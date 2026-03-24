@@ -13,7 +13,7 @@ const Typewriter = forwardRef(function Typewriter({ onReady }, ref) {
   useEffect(() => {
     let cancelled = false;
 
-    fetch('/Typewriter2.svg')
+    fetch(`${import.meta.env.BASE_URL}Typewriter2.svg`)
       .then((res) => res.text())
       .then((svgText) => {
         if (cancelled) return;

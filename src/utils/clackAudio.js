@@ -1,12 +1,15 @@
 /** How many files you have: public/audio/clack1.mp3 … clack{N}.mp3 */
 export const CLACK_MP3_COUNT = 8;
 
+/** GitHub Pages serves at /<repo>/; BASE_URL is set by Vite from `vite build --base=...` */
+const PUB = import.meta.env.BASE_URL;
+
 const CLACK_URLS = Array.from(
   { length: CLACK_MP3_COUNT },
-  (_, i) => `/audio/clack${i + 1}.mp3`,
+  (_, i) => `${PUB}audio/clack${i + 1}.mp3`,
 );
 
-const CARRIAGE_RETURN_URL = '/audio/carriagereturn.mp3';
+const CARRIAGE_RETURN_URL = `${PUB}audio/carriagereturn.mp3`;
 
 /** Per-hit gain (stacked hits sum before master — keep moderate to avoid digital clipping). */
 const VOICE_GAIN = 0.55;
