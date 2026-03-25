@@ -11,7 +11,9 @@ export default function App() {
   const [paperFormHost, setPaperFormHost] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [formStep, setFormStep] = useState('name');
-  const { init, playIntro, liftPaperForForm, setContactFormRow } = useTypewriterAnimation();
+  const [nameValue, setNameValue] = useState('');
+  const { init, playIntro, playPostSubmitThankYouSequence, setContactFormRow } =
+    useTypewriterAnimation();
 
   const goToEmailStep = useCallback(() => {
     setContactFormRow(1);
@@ -46,7 +48,7 @@ export default function App() {
   );
 
   const handleSend = useCallback(
-    (e) => {
+    async (e) => {
       e.preventDefault();
       const fo = paperContactFormFORef.current;
       if (fo?.isConnected)
@@ -55,9 +57,10 @@ export default function App() {
       setShowForm(false);
       setPaperFormHost(null);
       setFormStep('name');
-      liftPaperForForm();
+      setNameValue('');
+      await playPostSubmitThankYouSequence();
     },
-    [liftPaperForForm],
+    [playPostSubmitThankYouSequence],
   );
 
   const formTypography = {
@@ -78,7 +81,7 @@ export default function App() {
             <form
               onSubmit={handleSend}
               className="h-full w-full"
-              style={formTypography}
+              style={{ ...formTypography, isolation: 'isolate' }}
             >
               {formStep === 'name' ? (
                 <input
@@ -86,9 +89,11 @@ export default function App() {
                   type="text"
                   name="name"
                   placeholder="Name"
-                  className="m-0 h-full w-full border-0 border-b border-zinc-800 bg-transparent p-0 outline-none placeholder:text-zinc-600"
+                  className="m-0 h-full w-full border-0 bg-transparent p-0 outline-none placeholder:text-zinc-600"
                   style={{ font: 'inherit' }}
                   autoComplete="name"
+                  value={nameValue}
+                  onChange={(e) => setNameValue(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -97,23 +102,36 @@ export default function App() {
                   }}
                 />
               ) : (
-                <div className="flex h-full w-full items-center gap-1">
-                  <input
-                    ref={emailInputRef}
-                    type="email"
-                    name="email"
-                    placeholder="Email"
-                    className="m-0 min-w-0 flex-1 border-0 border-b border-zinc-800 bg-transparent p-0 outline-none placeholder:text-zinc-600"
-                    style={{ font: 'inherit' }}
-                    autoComplete="email"
-                  />
-                  <button
-                    type="submit"
-                    className="m-0 shrink-0 border border-zinc-800 bg-transparent px-1 py-0 leading-none text-inherit hover:bg-zinc-900 hover:text-white"
-                    style={{ font: 'inherit' }}
+                <div className="flex h-full w-full flex-col justify-start gap-0.5">
+                  <div
+                    className="m-0 w-full whitespace-nowrap overflow-hidden text-ellipsis"
+                    style={{ lineHeight: 1.2, paddingTop: '1px' }}
                   >
-                    Send
-                  </button>
+                    {nameValue}
+                  </div>
+                  <div className="mt-0.5 flex w-full items-start gap-0">
+                    <input
+                      ref={emailInputRef}
+                      type="email"
+                      name="email"
+                      placeholder="Email"
+                      className="m-0 min-w-0 flex-1 border-0 bg-transparent p-0 outline-none placeholder:text-zinc-600"
+                      style={{ font: 'inherit' }}
+                      autoComplete="email"
+                    />
+                    <button
+                      type="submit"
+                      className="relative z-[1] m-0 shrink-0 border border-zinc-800 bg-transparent px-1 py-px leading-none text-inherit hover:border-zinc-600 hover:text-zinc-950"
+                      style={{
+                        font: 'inherit',
+                        /* translate3d keeps own layer; avoid hover fill inside foreignObject (repaints blur/darken SVG) */
+                        transform: 'translate3d(-11px, -2px, 0)',
+                        backfaceVisibility: 'hidden',
+                      }}
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
               )}
             </form>,

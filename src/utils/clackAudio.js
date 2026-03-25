@@ -10,6 +10,8 @@ const CLACK_URLS = Array.from(
 );
 
 const CARRIAGE_RETURN_URL = `${PUB}audio/carriagereturn.mp3`;
+const SHIFT_URL = `${PUB}audio/shift.mp3`;
+const SPACE_BACKSPACE_URL = `${PUB}audio/spacebarandbackspace.mp3`;
 
 /** Per-hit gain (stacked hits sum before master — keep moderate to avoid digital clipping). */
 const VOICE_GAIN = 0.55;
@@ -20,6 +22,7 @@ let masterGain = null;
 let compressor = null;
 const buffers = new Map();
 const loading = new Map();
+const lastStartTimes = new Map();
 
 function getContext() {
   if (audioCtx) return audioCtx;
@@ -98,6 +101,8 @@ export function prefetchClackBuffers() {
   void Promise.all([
     ...CLACK_URLS.map((u) => decodeUrl(u).catch(() => {})),
     decodeUrl(CARRIAGE_RETURN_URL).catch(() => {}),
+    decodeUrl(SHIFT_URL).catch(() => {}),
+    decodeUrl(SPACE_BACKSPACE_URL).catch(() => {}),
   ]);
 }
 
@@ -114,6 +119,17 @@ function connectAndStart(ctx, buffer, gain) {
   } catch {
     /* ignore */
   }
+}
+
+function tryStartNonOverlapping(ctx, url, buffer, gain) {
+  if (!buffer) return false;
+  const now = ctx.currentTime;
+  const dur = Math.max(0, Number(buffer.duration) || 0);
+  const last = lastStartTimes.get(url) ?? -Infinity;
+  if (dur > 0 && now < last + dur) return false;
+  connectAndStart(ctx, buffer, gain);
+  lastStartTimes.set(url, now);
+  return true;
 }
 
 /**
@@ -159,4 +175,39 @@ export function playRandomKeyClack() {
 /** Carriage return / Enter — dedicated sample (public/audio/carriagereturn.mp3). */
 export function playCarriageReturn() {
   playOneShot(CARRIAGE_RETURN_URL);
+}
+
+/** Shift key uses dedicated sample (public/audio/shift.mp3). */
+export function playShiftKey() {
+  playOneShot(SHIFT_URL);
+}
+
+/** Space + Backspace share dedicated sample (public/audio/spacebarandbackspace.mp3). */
+export function playSpaceOrBackspace() {
+  playOneShot(SPACE_BACKSPACE_URL);
+}
+
+/**
+ * Backspace hold: repeat the same sample without overlap so each hit is fully audible.
+ */
+export function playSpaceOrBackspaceNonOverlapping() {
+  const ctx = getContext();
+  if (!ctx || !masterGain) return;
+
+  const cached = buffers.get(SPACE_BACKSPACE_URL);
+  if (cached && ctx.state === 'running') {
+    void tryStartNonOverlapping(ctx, SPACE_BACKSPACE_URL, cached, VOICE_GAIN);
+    return;
+  }
+
+  void ctx
+    .resume()
+    .then(() => decodeUrl(SPACE_BACKSPACE_URL))
+    .then((buffer) => {
+      if (!buffer) return;
+      if (ctx.state === 'running') {
+        void tryStartNonOverlapping(ctx, SPACE_BACKSPACE_URL, buffer, VOICE_GAIN);
+      }
+    })
+    .catch(() => {});
 }

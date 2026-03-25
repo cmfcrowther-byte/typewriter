@@ -6,6 +6,9 @@ import { charToKeySpec } from '../utils/charToKeySpec';
 import {
   playRandomKeyClack,
   playCarriageReturn,
+  playShiftKey,
+  playSpaceOrBackspace,
+  playSpaceOrBackspaceNonOverlapping,
   prefetchClackBuffers,
   resumeAudioContextSync,
 } from '../utils/clackAudio';
@@ -17,11 +20,14 @@ const TYPEBAR_UP_DUR    = 0.10;
 const TYPEBAR_DOWN_DUR  = 0.12;
 const RIBBON_DUR        = 0.06;
 const CARRIAGE_STEP_DUR = 0.08;
-/** Held Backspace: cadence + slightly slower mechanical motion so each press reads clearly */
-const BACKSPACE_REPEAT_MS    = 170;
-const BACKSPACE_KEY_DOWN_MULT = 1.65;
-const BACKSPACE_KEY_UP_MULT   = 1.55;
-const BACKSPACE_CARRIAGE_DUR  = 0.11;
+/** Held Backspace: no throttle + snappier mechanical timings for rapid repeats. */
+const BACKSPACE_REPEAT_MS    = 0;
+const BACKSPACE_KEY_DOWN_MULT = 0.85;
+const BACKSPACE_KEY_UP_MULT   = 0.85;
+const BACKSPACE_CARRIAGE_DUR  = 0.05;
+const BACKSPACE_HOLD_TRAVEL_Y = 7.2;
+const BACKSPACE_HOLD_DOWN_DUR = 0.035;
+const BACKSPACE_HOLD_UP_DUR   = 0.06;
 const SHIFT_DUR         = 0.12;
 const RETURN_LEVER_DUR  = 0.15;
 const RETURN_SLIDE_DUR  = 0.40;
@@ -42,6 +48,12 @@ const RIBBON_HOP           = 4.394;
 const SHIFT_LIFT           = 2.5;
 const RETURN_LEVER_ANGLE   = 25;  // lean right (clockwise) around transform-center
 const PAPER_ADVANCE_Y      = 11;  // move sheet upward on each carriage return
+/** Same distance as a carriage-return line — paper visibly slides when Email step appears. */
+const FORM_STEP_PAPER_SHIFT_Y = PAPER_ADVANCE_Y;
+/** Extra space below intro line 2 once Email step is shown (FO is taller; avoids crowding the message). */
+const FORM_EMAIL_EXTRA_GAP_Y = 5;
+/** After intro, nudge sheet + name field slightly higher (same delta before Email slide — email alignment unchanged). */
+const FORM_NAME_EXTRA_LIFT_Y = 2.8;
 
 const RETURN_SEQUENCE_MS =
   (RETURN_LEVER_DUR + RETURN_PAUSE + RETURN_SLIDE_DUR + RETURN_PAUSE + RETURN_LEVER_DUR * 1.2) *
@@ -49,8 +61,12 @@ const RETURN_SEQUENCE_MS =
 
 const INTRO_LINE_1 = 'Notes from the Minka bench.';
 const INTRO_LINE_2 = 'From our atelier to your inbox.';
+const THANK_YOU_LINE = 'Thanks for subscribing ....';
 const INTRO_CHAR_MS = 230;
 const SHIFT_TAP_MS = 55;
+/** New sheet starts this far down (viewBox Y); tween to 0 so it scrolls up from behind the platen. */
+const POST_SUBMIT_SHEET_ENTRANCE_Y = 150;
+const POST_SUBMIT_ENTRANCE_DUR = 1.05;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,6 +80,9 @@ export function useTypewriterAnimation() {
   /** Single source of truth for vertical translation shared by sheet art + typing overlay */
   const paperSlideProxyRef = useRef({ y: 0 });
   const lastBackspaceTickRef = useRef(0);
+  const leftSpoolDotIndexRef = useRef(0);
+  const rightSpoolDotIndexRef = useRef(0);
+  const postSubmitSequenceLockRef = useRef(false);
 
   /** Limits OS key-repeat rate for Backspace; prevents extra char delete in inputs when throttled. */
   function allowBackspaceTick(e, isFormField) {
@@ -82,6 +101,80 @@ export function useTypewriterAnimation() {
     const reg = registryRef.current;
     if (reg?.headedPaper) gsap.set(reg.headedPaper, { y });
     if (reg?.paperTypingLayer) gsap.set(reg.paperTypingLayer, { y });
+
+    const clip = reg?.paperSlideClip;
+    if (clip?.rectEl && Number.isFinite(clip.top0) && Number.isFinite(clip.chromeBottom)) {
+      let clipY = clip.top0 + y;
+      let h = clip.chromeBottom - clipY;
+      if (h < 0.25) {
+        h = 0.25;
+        clipY = clip.chromeBottom - h;
+      }
+      clip.rectEl.setAttribute('x', String(clip.clipX));
+      clip.rectEl.setAttribute('width', String(clip.clipWidth));
+      clip.rectEl.setAttribute('y', String(clipY));
+      clip.rectEl.setAttribute('height', String(h));
+    }
+  }
+
+  function dotIsVisible(el) {
+    if (!el) return false;
+    const styleAttr = (el.getAttribute('style') || '').toLowerCase();
+    if (/\bdisplay\s*:\s*none\b/.test(styleAttr)) return false;
+    const attrOpacity = parseFloat(el.getAttribute('opacity') || '');
+    if (Number.isFinite(attrOpacity) && attrOpacity <= 0.001) return false;
+    if (/\bopacity\s*:\s*0(?:[;\s]|$)/.test(styleAttr)) return false;
+    return true;
+  }
+
+  function setDotVisible(el, on) {
+    if (!el) return;
+    gsap.set(el, {
+      opacity: on ? 1 : 0,
+      display: on ? 'inline' : 'none',
+    });
+  }
+
+  function initRibbonSpoolDots(reg) {
+    const left = reg?.leftRibbonSpoolDots || [];
+    const right = reg?.rightRibbonSpoolDots || [];
+
+    if (left.length) {
+      let idx = left.findIndex(dotIsVisible);
+      if (idx < 0) idx = 0;
+      leftSpoolDotIndexRef.current = idx;
+      left.forEach((el, i) => setDotVisible(el, i === idx));
+    }
+
+    if (right.length) {
+      let idx = right.findIndex(dotIsVisible);
+      if (idx < 0) idx = 0;
+      rightSpoolDotIndexRef.current = idx;
+      right.forEach((el, i) => setDotVisible(el, i === idx));
+    }
+  }
+
+  function stepRibbonSpoolDots() {
+    const reg = registryRef.current;
+    if (!reg) return;
+    const left = reg.leftRibbonSpoolDots || [];
+    const right = reg.rightRibbonSpoolDots || [];
+
+    if (left.length > 1) {
+      const prev = leftSpoolDotIndexRef.current % left.length;
+      const next = (prev + 1) % left.length;
+      setDotVisible(left[prev], false);
+      setDotVisible(left[next], true);
+      leftSpoolDotIndexRef.current = next;
+    }
+
+    if (right.length > 1) {
+      const prev = rightSpoolDotIndexRef.current % right.length;
+      const next = (prev - 1 + right.length) % right.length;
+      setDotVisible(right[prev], false);
+      setDotVisible(right[next], true);
+      rightSpoolDotIndexRef.current = next;
+    }
   }
 
   /** rowIndex 0 = first line below intro line 2 (name); 1 = next line (email + send) */
@@ -89,10 +182,14 @@ export function useTypewriterAnimation() {
     if (!reg?.paperContactFormFO || !reg.paperLine2El) return;
     const y2 = parseFloat(reg.paperLine2El.getAttribute('y') || '0');
     if (!Number.isFinite(y2)) return;
-    const lineY = y2 + PAPER_ADVANCE_Y * (rowIndex + 1);
-    const baselineNudge = 6.5;
-    reg.paperContactFormFO.setAttribute('y', String(lineY - baselineNudge));
-    reg.paperContactFormFO.setAttribute('height', rowIndex === 0 ? '13' : '16');
+    // Keep form baseline fixed to the first input strike row;
+    // row transitions are achieved by moving the paper layer itself.
+    const lineY = y2 + PAPER_ADVANCE_Y;
+    // Lift form text slightly so descenders clear the stationary ribbon.
+    const baselineNudge = 7.7;
+    const emailExtraGap = rowIndex === 1 ? FORM_EMAIL_EXTRA_GAP_Y : 0;
+    reg.paperContactFormFO.setAttribute('y', String(lineY - baselineNudge + emailExtraGap));
+    reg.paperContactFormFO.setAttribute('height', rowIndex === 0 ? '13' : '24');
   }
 
   useEffect(() => {
@@ -104,7 +201,8 @@ export function useTypewriterAnimation() {
   }, []);
 
   // ── Character / Spacebar animation ───────────────────────────────
-  function animateKeyPress(code) {
+  function animateKeyPress(code, options = {}) {
+    const { isBackspaceRepeat = false } = options;
     const reg = registryRef.current;
     if (!reg) return;
 
@@ -115,20 +213,38 @@ export function useTypewriterAnimation() {
     const entry = isSpace ? null : reg.keys[code];
     if (!isSpace && !entry) return;
 
-    playRandomKeyClack();
+    if (isSpace || isBackspace) {
+      if (isBackspace && isBackspaceRepeat) {
+        // Hold-repeat Backspace should sound like rapid full clicks, not overlapping noise.
+        playSpaceOrBackspaceNonOverlapping();
+      } else {
+        playSpaceOrBackspace();
+      }
+    } else {
+      playRandomKeyClack();
+    }
+    if (!isSpace && !isBackspace) {
+      stepRibbonSpoolDots();
+    }
 
-    const keyDownDur = isBackspace ? KEY_DOWN_DUR * BACKSPACE_KEY_DOWN_MULT : KEY_DOWN_DUR;
-    const keyUpDur = isBackspace ? KEY_UP_DUR * BACKSPACE_KEY_UP_MULT : KEY_UP_DUR;
+    const keyDownDur = isBackspace
+      ? (isBackspaceRepeat ? BACKSPACE_HOLD_DOWN_DUR : KEY_DOWN_DUR * BACKSPACE_KEY_DOWN_MULT)
+      : KEY_DOWN_DUR;
+    const keyUpDur = isBackspace
+      ? (isBackspaceRepeat ? BACKSPACE_HOLD_UP_DUR : KEY_UP_DUR * BACKSPACE_KEY_UP_MULT)
+      : KEY_UP_DUR;
     const carriageDur = isBackspace ? BACKSPACE_CARRIAGE_DUR : CARRIAGE_STEP_DUR;
 
     const tl = gsap.timeline({ defaults: { overwrite: 'auto' } });
 
     // 1 ── Key + linkage press straight down (no side-to-side rotation) ─
     if (!isSpace && entry.group) {
+      const keyDownY = isBackspace && isBackspaceRepeat ? BACKSPACE_HOLD_TRAVEL_Y : KEY_TRAVEL_Y;
+      const keyDownEase = isBackspace && isBackspaceRepeat ? 'power2.out' : 'power2.in';
       tl.to(entry.group, {
-        y: KEY_TRAVEL_Y,
+        y: keyDownY,
         duration: keyDownDur,
-        ease: 'power2.in',
+        ease: keyDownEase,
       }, 0);
     }
 
@@ -136,6 +252,23 @@ export function useTypewriterAnimation() {
       tl.to(reg.spacebar, {
         y: 2,
         duration: KEY_DOWN_DUR,
+        ease: 'power2.in',
+      }, 0);
+    }
+
+    if (isBackspace && reg.rightShift?.spring) {
+      tl.to(reg.rightShift.spring, {
+        scaleY: 1.18,
+        transformOrigin: '50% 100%',
+        duration: keyDownDur,
+        ease: 'power2.in',
+      }, 0);
+    }
+    if (isBackspace && reg.leftShift?.spring) {
+      tl.to(reg.leftShift.spring, {
+        scaleY: 1.18,
+        transformOrigin: '50% 0%',
+        duration: keyDownDur,
         ease: 'power2.in',
       }, 0);
     }
@@ -242,11 +375,13 @@ export function useTypewriterAnimation() {
 
     // 5 ── Key + linkage returns up ─────────────────────────────────
     if (!isSpace && entry.group) {
+      const keyUpStart = isBackspace && isBackspaceRepeat ? keyDownDur : keyDownDur + 0.02;
+      const keyUpEase = isBackspace && isBackspaceRepeat ? 'power3.out' : 'elastic.out(1, 0.5)';
       tl.to(entry.group, {
         y: 0,
         duration: keyUpDur,
-        ease: 'elastic.out(1, 0.5)',
-      }, keyDownDur + 0.02);
+        ease: keyUpEase,
+      }, keyUpStart);
     }
 
     if (isSpace && reg.spacebar) {
@@ -255,6 +390,23 @@ export function useTypewriterAnimation() {
         duration: KEY_UP_DUR,
         ease: 'elastic.out(1, 0.5)',
       }, KEY_DOWN_DUR + 0.02);
+    }
+
+    if (isBackspace && reg.rightShift?.spring) {
+      tl.to(reg.rightShift.spring, {
+        scaleY: 1,
+        transformOrigin: '50% 100%',
+        duration: keyUpDur,
+        ease: 'elastic.out(1, 0.5)',
+      }, keyDownDur + 0.02);
+    }
+    if (isBackspace && reg.leftShift?.spring) {
+      tl.to(reg.leftShift.spring, {
+        scaleY: 1,
+        transformOrigin: '50% 0%',
+        duration: keyUpDur,
+        ease: 'elastic.out(1, 0.5)',
+      }, keyDownDur + 0.02);
     }
   }
 
@@ -277,7 +429,7 @@ export function useTypewriterAnimation() {
     if (shift.spring) {
       tl.to(shift.spring, {
         scaleY: 1.15,
-        transformOrigin: '50% 100%',
+        transformOrigin: isLeft ? '50% 0%' : '50% 100%',
         duration: SHIFT_DUR,
         ease: 'power2.out',
       }, 0);
@@ -299,14 +451,15 @@ export function useTypewriterAnimation() {
     const tl = gsap.timeline();
     shiftTlRef.current = tl;
 
-    [reg.leftShift, reg.rightShift].forEach((shift) => {
+    [reg.leftShift, reg.rightShift].forEach((shift, idx) => {
+      const springOrigin = idx === 0 ? '50% 0%' : '50% 100%';
       if (shift.keyCap) {
         tl.to(shift.keyCap, { y: 0, duration: KEY_UP_DUR, ease: 'elastic.out(1, 0.5)' }, 0);
       }
       if (shift.spring) {
         tl.to(shift.spring, {
           scaleY: 1,
-          transformOrigin: '50% 100%',
+          transformOrigin: springOrigin,
           duration: KEY_UP_DUR,
           ease: 'elastic.out(1, 0.5)',
         }, 0);
@@ -327,6 +480,7 @@ export function useTypewriterAnimation() {
 
     resumeAudioContextSync();
     playCarriageReturn();
+    stepRibbonSpoolDots();
 
     const tl = gsap.timeline({ defaults: { overwrite: 'auto' } });
 
@@ -395,15 +549,94 @@ export function useTypewriterAnimation() {
 
   function liftPaperForForm() {
     const reg = registryRef.current;
-    if (!reg?.headedPaper && !reg?.paperTypingLayer) return;
+    if (!reg?.headedPaper && !reg?.paperTypingLayer) return Promise.resolve();
     const proxy = paperSlideProxyRef.current;
     gsap.killTweensOf(proxy);
-    gsap.to(proxy, {
-      y: proxy.y - 380,
-      duration: 1.15,
-      ease: 'power2.inOut',
-      onUpdate: applyPaperSlideTransform,
+    return new Promise((resolve) => {
+      gsap.to(proxy, {
+        y: proxy.y - 380,
+        duration: 1.15,
+        ease: 'power2.inOut',
+        onUpdate: applyPaperSlideTransform,
+        onComplete: resolve,
+      });
     });
+  }
+
+  async function playPostSubmitThankYouSequence() {
+    const reg = registryRef.current;
+    if (!reg?.paperLine1El || !reg?.paperLine2El || postSubmitSequenceLockRef.current) return;
+    postSubmitSequenceLockRef.current = true;
+    introActiveRef.current = true;
+    try {
+      await liftPaperForForm();
+
+      reg.paperLine1El.textContent = '';
+      reg.paperLine2El.textContent = '';
+
+      const sx =
+        reg.typedStrikeX ?? parseFloat(reg.paperLine1El.getAttribute('x') || '0');
+      const sy =
+        reg.typedStrikeLine1Y ?? parseFloat(reg.paperLine1El.getAttribute('y') || '0');
+      reg.paperLine1El.setAttribute('x', String(sx));
+      reg.paperLine1El.setAttribute('y', String(sy));
+      reg.paperLine2El.setAttribute('x', String(sx));
+      reg.paperLine2El.setAttribute('y', String(sy + PAPER_ADVANCE_Y));
+
+      if (reg.paperContactFormFO) {
+        reg.paperContactFormFO.setAttribute(
+          'style',
+          'display:none;pointer-events:none;visibility:hidden',
+        );
+      }
+
+      paperSlideProxyRef.current.y = POST_SUBMIT_SHEET_ENTRANCE_Y;
+      applyPaperSlideTransform();
+
+      carriagePosRef.current = CARRIAGE_HOME_X;
+      if (reg.carriageWrapper) {
+        gsap.killTweensOf(reg.carriageWrapper);
+        gsap.set(reg.carriageWrapper, { x: CARRIAGE_HOME_X });
+      }
+
+      const proxy = paperSlideProxyRef.current;
+      gsap.killTweensOf(proxy);
+      await new Promise((resolve) => {
+        gsap.to(proxy, {
+          y: 0,
+          duration: POST_SUBMIT_ENTRANCE_DUR,
+          ease: 'power2.out',
+          onUpdate: applyPaperSlideTransform,
+          onComplete: resolve,
+        });
+      });
+
+      const stroke = async (ch, lineEl) => {
+        const spec = charToKeySpec(ch);
+        if (spec.lineBreak || !spec.code) return;
+        await sleep(INTRO_CHAR_MS);
+        if (spec.shift) {
+          animateShiftDown('ShiftLeft');
+          await sleep(SHIFT_TAP_MS);
+        }
+        animateKeyPress(spec.code);
+        lineEl.textContent += ch;
+        if (spec.shift) {
+          await sleep(SHIFT_TAP_MS);
+          animateShiftUp();
+        }
+      };
+
+      for (const ch of THANK_YOU_LINE) {
+        await stroke(ch, reg.paperLine1El);
+      }
+      await sleep(380);
+      animateReturn();
+      await sleep(RETURN_SEQUENCE_MS);
+    } finally {
+      introActiveRef.current = false;
+      postSubmitSequenceLockRef.current = false;
+    }
   }
 
   /**
@@ -498,6 +731,8 @@ export function useTypewriterAnimation() {
       animateReturn();
       await sleep(RETURN_SEQUENCE_MS);
       await revealFormPaper({ advancePaper: false });
+      paperSlideProxyRef.current.y -= FORM_NAME_EXTRA_LIFT_Y;
+      applyPaperSlideTransform();
       introActiveRef.current = false;
       onComplete?.({
         paperFormHost: reg.paperFormHost ?? null,
@@ -529,13 +764,14 @@ export function useTypewriterAnimation() {
         if (!heldKeysRef.current.has(code)) {
           heldKeysRef.current.add(code);
           animateShiftDown(code);
+          playShiftKey();
         }
         return;
       }
       // Match physical typing: letter/symbol/stroke keys (capture order so we still see portal inputs)
       if (CHARACTER_CODES.has(code)) {
         if (!allowBackspaceTick(e, true)) return;
-        animateKeyPress(code);
+        animateKeyPress(code, { isBackspaceRepeat: code === 'Backspace' && e.repeat });
       }
       return;
     }
@@ -550,11 +786,12 @@ export function useTypewriterAnimation() {
 
     if (SHIFT_CODES.has(code)) {
       animateShiftDown(code);
+      playShiftKey();
     } else if (code === 'Enter') {
       animateReturn();
     } else if (CHARACTER_CODES.has(code)) {
       if (!allowBackspaceTick(e, false)) return;
-      animateKeyPress(code);
+      animateKeyPress(code, { isBackspaceRepeat: code === 'Backspace' && e.repeat });
     }
   }
 
@@ -564,12 +801,24 @@ export function useTypewriterAnimation() {
 
     if (SHIFT_CODES.has(code)) {
       animateShiftUp();
+      playShiftKey();
     }
   }
 
   const setContactFormRow = useCallback((rowIndex) => {
     const reg = registryRef.current;
     layoutContactFormAtRow(reg, rowIndex);
+    if (rowIndex === 1) {
+      const proxy = paperSlideProxyRef.current;
+      const nextY = proxy.y - FORM_STEP_PAPER_SHIFT_Y;
+      gsap.killTweensOf(proxy);
+      gsap.to(proxy, {
+        y: nextY,
+        duration: 0.58,
+        ease: 'power2.inOut',
+        onUpdate: applyPaperSlideTransform,
+      });
+    }
     if (rowIndex === 1 && reg?.carriageWrapper) {
       carriagePosRef.current = CARRIAGE_HOME_X;
       gsap.to(reg.carriageWrapper, {
@@ -601,6 +850,7 @@ export function useTypewriterAnimation() {
     if (reg?.headedPaper) gsap.killTweensOf(reg.headedPaper);
     if (reg?.paperTypingLayer) gsap.killTweensOf(reg.paperTypingLayer);
     applyPaperSlideTransform();
+    initRibbonSpoolDots(reg);
 
     if (handlersRef.current.down) {
       window.removeEventListener('keydown', handlersRef.current.down, true);
@@ -612,5 +862,12 @@ export function useTypewriterAnimation() {
     prefetchClackBuffers();
   }, []);
 
-  return { init, playIntro, liftPaperForForm, animateKeyPress, setContactFormRow };
+  return {
+    init,
+    playIntro,
+    liftPaperForForm,
+    playPostSubmitThankYouSequence,
+    animateKeyPress,
+    setContactFormRow,
+  };
 }

@@ -14,6 +14,102 @@ function wrapElement(el) {
 }
 
 /**
+ * Axis-aligned bounds of `clipGeomEl`'s getBBox(), expressed in `targetSpaceEl`'s
+ * user space (so clip can stay fixed on the carriage while children slide with GSAP).
+ */
+/**
+ * Prefer literal <rect> attributes when ClipMask is a direct child of #Carriage
+ * (same coordinate system as PaperWindowClip). getBBox()+getCTM() can skew the
+ * box and clip off the letterhead even when the authored rect does not.
+ */
+function clipRectForPaperWindow(clipGeomEl, carriageEl) {
+  if (!clipGeomEl || !carriageEl) return null;
+  if (clipGeomEl instanceof SVGRectElement && clipGeomEl.parentNode === carriageEl) {
+    const tr = clipGeomEl.getAttribute('transform');
+    const hasTransform = Boolean(tr && tr.trim() && tr.trim() !== 'none');
+    if (!hasTransform) {
+      const x = parseFloat(clipGeomEl.getAttribute('x') || '0');
+      const y = parseFloat(clipGeomEl.getAttribute('y') || '0');
+      const w = parseFloat(clipGeomEl.getAttribute('width') || '0');
+      const h = parseFloat(clipGeomEl.getAttribute('height') || '0');
+      if (w > 0 && h > 0) {
+        return { x, y, width: w, height: h };
+      }
+    }
+  }
+  return axisAlignedClipRectInTargetSpace(clipGeomEl, carriageEl);
+}
+
+function axisAlignedClipRectInTargetSpace(clipGeomEl, targetSpaceEl) {
+  if (!clipGeomEl || !targetSpaceEl) return null;
+  try {
+    const bb = clipGeomEl.getBBox();
+    if (!(bb.width > 0) || !(bb.height > 0)) return null;
+    const corners = [
+      new DOMPoint(bb.x, bb.y),
+      new DOMPoint(bb.x + bb.width, bb.y),
+      new DOMPoint(bb.x + bb.width, bb.y + bb.height),
+      new DOMPoint(bb.x, bb.y + bb.height),
+    ];
+    const mClip = clipGeomEl.getCTM();
+    const mTarget = targetSpaceEl.getCTM();
+    if (!mClip || !mTarget) return null;
+    const m = mTarget.inverse().multiply(mClip);
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const c of corners) {
+      const p = c.matrixTransform(m);
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+    const w = maxX - minX;
+    const h = maxY - minY;
+    if (!(w > 0) || !(h > 0)) return null;
+    return { x: minX, y: minY, width: w, height: h };
+  } catch {
+    return null;
+  }
+}
+
+function ensureDefs(svg) {
+  let defs = svg.querySelector('defs');
+  if (!defs) {
+    defs = document.createElementNS(SVG_NS, 'defs');
+    svg.insertBefore(defs, svg.firstChild);
+  }
+  return defs;
+}
+
+/**
+ * Bottom edge (max Y) of #Carriage artwork only: hide the paper + ClipMask so
+ * their geometry does not extend the bbox, then read carriage getBBox().
+ */
+function getCarriageChromeBottomY(carriageEl, headedPaper, clipMaskEl) {
+  if (!carriageEl) return null;
+  const restore = [];
+  try {
+    for (const el of [headedPaper, clipMaskEl]) {
+      if (!el) continue;
+      restore.push([el, el.getAttribute('display')]);
+      el.setAttribute('display', 'none');
+    }
+    const bb = carriageEl.getBBox();
+    return bb.y + bb.height;
+  } catch {
+    return null;
+  } finally {
+    for (const [el, was] of restore) {
+      if (was == null) el.removeAttribute('display');
+      else el.setAttribute('display', was);
+    }
+  }
+}
+
+/**
  * Convert a point in `el`'s local coordinate space to the SVG viewBox
  * coordinate space (what GSAP's svgOrigin expects).
  */
@@ -275,7 +371,11 @@ export function buildPartRegistry(container) {
   let paperTypingLayer = null;
   let paperContactFormFO = null;
   let paperFormHost = null;
-  let typedBaselineY = -300;
+  /** Baseline Y for first typed line (exported for post-submit sheet reset). */
+  let typedStrikeX = null;
+  let typedStrikeLine1Y = null;
+  /** When set: clip top tracks paperSlideProxy.y, bottom fixed at chromeBottom (see hook). */
+  let paperSlideClip = null;
   if (headedPaper) {
     const paperPath = headedPaper.querySelector('#Paper') || byId('Paper');
     const platenFront = carriageEl?.querySelector('#PlatenFront');
@@ -298,7 +398,8 @@ export function buildPartRegistry(container) {
         ty = bb.y + bb.height * 0.38;
       } catch { /* */ }
     }
-    typedBaselineY = ty;
+    typedStrikeX = tx;
+    typedStrikeLine1Y = ty;
 
     const typed = document.createElementNS(SVG_NS, 'text');
     typed.setAttribute('id', 'PaperTypedText');
@@ -350,23 +451,78 @@ export function buildPartRegistry(container) {
       } catch { /* */ }
     }
 
-    // Typed text + form must paint above Ribbon/Typebars (Carriage siblings drawn after HeadedPaper).
-    // Keep the sheet/letterpress art under the mechanism; sync vertical motion with headedPaper in the hook.
+    // Typed text + form: mount inside optional PaperWindowClip (below); hook syncs y on headedPaper + layer.
     paperTypingLayer = document.createElementNS(SVG_NS, 'g');
     paperTypingLayer.setAttribute('id', 'PaperTypingLayer');
     paperTypingLayer.appendChild(typed);
     if (fo) paperTypingLayer.appendChild(fo);
+
+    if (carriageEl) {
+      const clipMaskEl =
+        svg.querySelector('[inkscape\\:label="ClipMask"]') || byId('ClipMask');
+      let mountedTyping = false;
+
+      if (clipMaskEl && headedPaper.parentNode === carriageEl) {
+        let r = clipRectForPaperWindow(clipMaskEl, carriageEl);
+        if (r) {
+          const chromeMeasured = getCarriageChromeBottomY(carriageEl, headedPaper, clipMaskEl);
+          const chromeBottom =
+            chromeMeasured != null &&
+            Number.isFinite(chromeMeasured) &&
+            chromeMeasured > r.y + 0.5
+              ? chromeMeasured
+              : r.y + r.height;
+          r = {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: chromeBottom - r.y,
+          };
+          const defs = ensureDefs(svg);
+          const oldCp = byId('MinkaPaperWindowClip');
+          if (oldCp) oldCp.remove();
+
+          const cp = document.createElementNS(SVG_NS, 'clipPath');
+          cp.setAttribute('id', 'MinkaPaperWindowClip');
+          cp.setAttribute('clipPathUnits', 'userSpaceOnUse');
+          const clipRect = document.createElementNS(SVG_NS, 'rect');
+          clipRect.setAttribute('id', 'PaperWindowClipRect');
+          clipRect.setAttribute('x', String(r.x));
+          clipRect.setAttribute('y', String(r.y));
+          clipRect.setAttribute('width', String(r.width));
+          clipRect.setAttribute('height', String(r.height));
+          cp.appendChild(clipRect);
+          defs.appendChild(cp);
+
+          paperSlideClip = {
+            rectEl: clipRect,
+            top0: r.y,
+            chromeBottom,
+            clipX: r.x,
+            clipWidth: r.width,
+          };
+
+          const clipParent = document.createElementNS(SVG_NS, 'g');
+          clipParent.setAttribute('id', 'PaperWindowClip');
+          clipParent.setAttribute('clip-path', 'url(#MinkaPaperWindowClip)');
+          carriageEl.insertBefore(clipParent, headedPaper);
+          clipParent.appendChild(headedPaper);
+          clipParent.appendChild(paperTypingLayer);
+          clipMaskEl.setAttribute('display', 'none');
+          mountedTyping = true;
+        }
+      }
+
+      if (!mountedTyping) {
+        carriageEl.appendChild(paperTypingLayer);
+      }
+    } else {
+      headedPaper.appendChild(paperTypingLayer);
+    }
   }
 
   // ── Carriage wrapper ─────────────────────────────────────────────
   const carriageWrapper = carriageEl ? wrapElement(carriageEl) : null;
-
-  // After wrap so the layer is a direct child of the final <g id="Carriage"> subtree (above ribbon/typebars).
-  if (paperTypingLayer && carriageEl) {
-    carriageEl.appendChild(paperTypingLayer);
-  } else if (paperTypingLayer && headedPaper) {
-    headedPaper.appendChild(paperTypingLayer);
-  }
 
   // ── Carriage lifting mechanism wrapper ───────────────────────────
   const carriageLiftEl =
@@ -382,6 +538,21 @@ export function buildPartRegistry(container) {
   // ── Ribbon carrier wrapper ───────────────────────────────────────
   const ribbonCarrierEl = byId('RibbonCarrier');
   const ribbonCarrierWrapper = ribbonCarrierEl ? wrapElement(ribbonCarrierEl) : null;
+
+  // ── Ribbon spool dots (1..11) ────────────────────────────────────
+  const collectRibbonDots = (prefix) =>
+    Array.from(svg.querySelectorAll(`[id^="${prefix}"]`))
+      .map((el) => {
+        const m = /(\d+)$/.exec(el.id || '');
+        return m ? { el, n: Number(m[1]) } : null;
+      })
+      .filter(Boolean)
+      // Numbering was authored in reverse; descending gives visual forward motion.
+      .sort((a, b) => b.n - a.n)
+      .map((x) => x.el);
+
+  const leftRibbonSpoolDots = collectRibbonDots('LeftRibbonSpDot');
+  const rightRibbonSpoolDots = collectRibbonDots('RightRibbonSpDot');
 
   // ── Shift keys ───────────────────────────────────────────────────
   const leftShiftGroup  = byId('LeftShiftKeyAndSpring');
@@ -433,6 +604,8 @@ export function buildPartRegistry(container) {
     carriageLiftWrapper,
     ribbon,
     ribbonCarrierWrapper,
+    leftRibbonSpoolDots,
+    rightRibbonSpoolDots,
     leftShift:  { group: leftShiftGroup,  spring: leftShiftSpring,  keyCap: leftShiftKey },
     rightShift: { group: rightShiftGroup, spring: rightShiftSpring, keyCap: rightShiftKey },
     returnLever,
@@ -441,5 +614,8 @@ export function buildPartRegistry(container) {
     returnLeverSvgOrigin,
     returnLeverTransformOrigin,
     spacebar,
+    typedStrikeX,
+    typedStrikeLine1Y,
+    paperSlideClip,
   };
 }

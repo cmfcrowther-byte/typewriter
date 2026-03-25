@@ -21,3 +21,6 @@ Thumbs.db
 
 # Vite
 *.local
+
+# Audio samples are loaded from public/audio (see clackAudio.js). Ignore duplicate folder at repo root.
+/audio/

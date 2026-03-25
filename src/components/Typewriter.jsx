@@ -66,7 +66,11 @@ const Typewriter = forwardRef(function Typewriter({ onReady }, ref) {
       <div
         ref={containerRef}
         className="w-full h-full"
-        style={{ minHeight: 0 }}
+        style={{
+          minHeight: 0,
+          transform: 'translateZ(0)',
+          backfaceVisibility: 'hidden',
+        }}
       />
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-zinc-900">
