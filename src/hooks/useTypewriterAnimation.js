@@ -569,6 +569,12 @@ export function useTypewriterAnimation() {
     postSubmitSequenceLockRef.current = true;
     introActiveRef.current = true;
     try {
+      // Send flow: if the carriage is off-home, perform a real return (lever + slide)
+      // before the sheet flies out so this transition matches physical behavior.
+      if (Math.abs(carriagePosRef.current - CARRIAGE_HOME_X) > 0.25) {
+        animateReturn();
+        await sleep(RETURN_SEQUENCE_MS);
+      }
       await liftPaperForForm();
 
       reg.paperLine1El.textContent = '';

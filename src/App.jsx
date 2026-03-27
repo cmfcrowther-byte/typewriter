@@ -2,6 +2,7 @@ import { useRef, useCallback, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Typewriter from './components/Typewriter';
 import { useTypewriterAnimation } from './hooks/useTypewriterAnimation';
+import { supabase } from './utils/supabaseClient';
 
 export default function App() {
   const containerRef = useRef(null);
@@ -12,6 +13,7 @@ export default function App() {
   const [showForm, setShowForm] = useState(false);
   const [formStep, setFormStep] = useState('name');
   const [nameValue, setNameValue] = useState('');
+  const [sending, setSending] = useState(false);
   const { init, playIntro, playPostSubmitThankYouSequence, setContactFormRow } =
     useTypewriterAnimation();
 
@@ -50,17 +52,38 @@ export default function App() {
   const handleSend = useCallback(
     async (e) => {
       e.preventDefault();
-      const fo = paperContactFormFORef.current;
-      if (fo?.isConnected)
-        fo.setAttribute('style', 'display:none;pointer-events:none;visibility:hidden');
-      paperContactFormFORef.current = null;
-      setShowForm(false);
-      setPaperFormHost(null);
-      setFormStep('name');
-      setNameValue('');
-      await playPostSubmitThankYouSequence();
+      if (sending) return;
+
+      const formData = new FormData(e.currentTarget);
+      const mantra = String(formData.get('email') || '').trim();
+      const personal = String(nameValue || '').trim();
+
+      setSending(true);
+      try {
+        if (supabase && mantra) {
+          const { error } = await supabase.from('minkaleads').insert([{ mantra, personal }]);
+          if (error) {
+            console.error('Supabase insert failed:', error);
+          }
+        }
+      } catch (err) {
+        console.error('Supabase request failed:', err);
+      }
+      try {
+        const fo = paperContactFormFORef.current;
+        if (fo?.isConnected)
+          fo.setAttribute('style', 'display:none;pointer-events:none;visibility:hidden');
+        paperContactFormFORef.current = null;
+        setShowForm(false);
+        setPaperFormHost(null);
+        setFormStep('name');
+        setNameValue('');
+        await playPostSubmitThankYouSequence();
+      } finally {
+        setSending(false);
+      }
     },
-    [playPostSubmitThankYouSequence],
+    [nameValue, playPostSubmitThankYouSequence, sending],
   );
 
   const formTypography = {
@@ -118,9 +141,11 @@ export default function App() {
                       className="m-0 min-w-0 flex-1 border-0 bg-transparent p-0 outline-none placeholder:text-zinc-600"
                       style={{ font: 'inherit' }}
                       autoComplete="email"
+                      required
                     />
                     <button
                       type="submit"
+                      disabled={sending}
                       className="relative z-[1] m-0 shrink-0 border border-zinc-800 bg-transparent px-1 py-px leading-none text-inherit hover:border-zinc-600 hover:text-zinc-950"
                       style={{
                         font: 'inherit',
