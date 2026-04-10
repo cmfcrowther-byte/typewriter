@@ -1,4 +1,5 @@
-# Build with repo base path and publish to gh-pages (Settings → Pages → Branch: gh-pages / /root).
+# Publishes to GitHub Pages (Settings → Pages → Build: GitHub Actions).
+# After toggling repo private/public, re-open Settings → Pages and ensure the source is "GitHub Actions".
 name: Deploy GitHub Pages
 
 on:
@@ -7,14 +8,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +30,16 @@ jobs:
       - run: npm ci
       - run: npm run build:gh
 
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
